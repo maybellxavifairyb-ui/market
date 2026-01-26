@@ -3,16 +3,19 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { MarketFile, AnalysisResult } from "../types";
 
 export class GeminiService {
-  private ai: GoogleGenAI;
-
-  constructor() {
-    // Guidelines: Always use new GoogleGenAI({ apiKey: process.env.API_KEY });
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  }
-
+  /**
+   * 深度分析市场报告
+   * 规范：不在构造函数或全局初始化 GoogleGenAI，而是在调用时实时创建。
+   */
   async analyzeMarketReports(files: MarketFile[]): Promise<AnalysisResult> {
-    // Guidelines: Use 'gemini-3-pro-preview' for complex reasoning tasks.
-    const model = 'gemini-3-pro-preview';
+    // 确保在调用时获取最新的 API Key
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      throw new Error("API Key 未配置，请检查环境设置");
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    const model = 'gemini-3-pro-preview'; // 使用 Pro 模型处理复杂分析任务
     
     const docMimeTypes = [
       'application/pdf',
@@ -25,7 +28,6 @@ export class GeminiService {
     ];
 
     const parts = files.map(file => {
-      // 如果是图片或已知的文档格式且有 base64 内容
       const isSupportedDoc = docMimeTypes.includes(file.type);
       const isImage = file.type.startsWith('image/');
 
@@ -33,31 +35,27 @@ export class GeminiService {
         return {
           inlineData: {
             mimeType: file.type,
-            data: file.content.split(',')[1] // 提取 base64 部分
+            data: file.content.split(',')[1]
           }
         };
       }
-      // 如果是纯文本内容
       if (file.previewType === 'text' && file.content) {
-        return { text: `文件名: ${file.name}\n文本内容: ${file.content}\n` };
+        return { text: `文件名: ${file.name}\n内容: ${file.content}\n` };
       }
-      // 兜底策略：仅发送文件名和类型
-      return { text: `文件名: ${file.name}\n文件类型: ${file.type}\n注：该文件以元数据形式参与分析。` };
+      return { text: `文件名: ${file.name}\n类型: ${file.type}\n` };
     });
 
     const prompt = `
-      你是一名世界级的市场分析专家。请阅读并深度分析提供的所有文件（包括图像、PDF、Word文档、Excel表格、PPT幻灯片和文本）。
+      你是一名世界级的市场分析专家。请阅读并深度分析提供的所有文件（图像、PDF、Word、Excel、PPT、文本）。
       请整合所有信息，生成一份深度市场分析报告。
       
       要求：
-      1. 必须包含标题(title)、摘要(summary)、关键洞察(keyInsights)、建议(recommendations)、竞品分析(competitorAnalysis)和行业趋势(trends)。
-      2. 语言必须使用专业且通顺的中文。
-      3. 严格按照 JSON 格式输出。
-      4. 即使文件格式复杂，也要尽力提取其中的核心数据或战略意义。
+      1. 语言：专业中文。
+      2. 格式：严格 JSON 格式。
+      3. 结构：包含 title, summary, keyInsights, recommendations, competitorAnalysis, trends。
     `;
 
-    // Guidelines: Use ai.models.generateContent directly.
-    const response = await this.ai.models.generateContent({
+    const response = await ai.models.generateContent({
       model,
       contents: { parts: [...parts, { text: prompt }] },
       config: {
@@ -77,9 +75,7 @@ export class GeminiService {
       }
     });
 
-    // Guidelines: response.text is a property, not a method.
-    const text = response.text || '{}';
-    return JSON.parse(text);
+    return JSON.parse(response.text || '{}');
   }
 }
 
