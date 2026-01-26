@@ -1,0 +1,7 @@
+{
+  "name": "智能市场分析报告管理系统",
+  "description": "一个功能齐全的市场分析报告存储与分析平台，支持多文件上传、预览、批量处理、智能AI分析及导出功能。",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
