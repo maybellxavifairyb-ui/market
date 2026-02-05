@@ -5,10 +5,20 @@ export interface MarketFile {
   size: number;
   type: string;
   uploadDate: number;
-  content?: string; // Base64 数据，供 Gemini API 使用
-  previewUrl?: string; // 图片的 DataURL
-  blobUrl?: string; // PDF 等文件的 session Blob URL
+  content?: string;
+  previewUrl?: string;
+  blobUrl?: string;
   previewType: 'image' | 'pdf' | 'text' | 'unsupported';
+}
+
+export interface Customer {
+  id: string;
+  name: string;
+  equipment: string;    // 装置
+  capacity: string;     // 产能
+  rawMaterials: string; // 需求原料
+  products: string;     // 产成品
+  grossMargin: number;  // 毛利 (%)
 }
 
 export interface AnalysisResult {
@@ -18,7 +28,9 @@ export interface AnalysisResult {
   recommendations: string[];
   competitorAnalysis: string;
   trends: string[];
+  customerStrategies?: { name: string; strategy: string; opportunity: string }[];
 }
 
 export type SortField = 'name' | 'size' | 'uploadDate';
 export type SortOrder = 'asc' | 'desc';
+export type AppView = 'reports' | 'customers' | 'analysis';
