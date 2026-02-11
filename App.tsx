@@ -5,8 +5,10 @@ import {
   FileSearch, CheckSquare, Square, Loader2, X, FileWarning, PieChart, 
   FileDown, FileSpreadsheet, Presentation, Key, Users, LayoutDashboard, 
   BarChart4, Save, Edit3, TrendingUp, AlertCircle, Activity, Target, 
-  Zap, ChevronRight, Filter, Globe, Database, Eye, Clock, HardDrive
+  Zap, ChevronRight, Filter, Globe, Database, Eye, Clock, HardDrive,
+  Braces, BookOpen
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { MarketFile, Customer, AnalysisResult, AppView } from './types';
 import { geminiService } from './services/geminiService';
 
@@ -17,6 +19,77 @@ const formatFileSize = (bytes: number) => {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
+
+// --- JSON 语法高亮组件 ---
+const JsonHighlighter: React.FC<{ content: string }> = ({ content }) => {
+  try {
+    const obj = JSON.parse(content);
+    const jsonStr = JSON.stringify(obj, null, 2);
+    
+    // 简单的正则表达式语法高亮
+    const highlighted = jsonStr.replace(
+      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      (match) => {
+        let cls = 'text-slate-700'; // 默认颜色
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            cls = 'text-blue-600 font-bold'; // Key
+          } else {
+            cls = 'text-emerald-600'; // String
+          }
+        } else if (/true|false/.test(match)) {
+          cls = 'text-amber-600'; // Boolean
+        } else if (/null/.test(match)) {
+          cls = 'text-slate-400'; // Null
+        } else {
+          cls = 'text-orange-600'; // Number
+        }
+        return `<span class="${cls}">${match}</span>`;
+      }
+    );
+
+    return (
+      <pre 
+        className="font-mono text-sm leading-relaxed p-6 bg-slate-900 rounded-2xl text-slate-300 overflow-x-auto selection:bg-blue-500/30"
+        dangerouslySetInnerHTML={{ __html: highlighted }}
+      />
+    );
+  } catch (e) {
+    return <pre className="whitespace-pre-wrap font-mono text-sm text-slate-700">{content}</pre>;
+  }
+};
+
+// --- 文本内容智能预览组件 ---
+const SmartTextPreview: React.FC<{ file: MarketFile }> = ({ file }) => {
+  const isJson = file.name.endsWith('.json') || (file.content?.trim().startsWith('{') || file.content?.trim().startsWith('['));
+  const isMarkdown = file.name.endsWith('.md');
+
+  return (
+    <div className="bg-white p-8 md:p-12 rounded-[32px] shadow-sm border border-slate-100 max-w-4xl mx-auto animate-in fade-in zoom-in-95 duration-300">
+      {isJson ? (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-blue-600 font-bold text-xs uppercase tracking-widest mb-2">
+            <Braces size={14} /> 检测到 JSON 格式
+          </div>
+          <JsonHighlighter content={file.content || ''} />
+        </div>
+      ) : isMarkdown ? (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-emerald-600 font-bold text-xs uppercase tracking-widest mb-2">
+            <BookOpen size={14} /> Markdown 文档预览
+          </div>
+          <article className="prose prose-slate prose-blue max-w-none selection:bg-blue-100">
+            <ReactMarkdown>{file.content || ''}</ReactMarkdown>
+          </article>
+        </div>
+      ) : (
+        <div className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-slate-700 selection:bg-blue-100">
+          {file.content}
+        </div>
+      )}
+    </div>
+  );
 };
 
 // --- 可视化组件：毛利分布图 ---
@@ -103,7 +176,7 @@ const App: React.FC = () => {
       const f = uploaded[i];
       const isImage = f.type.startsWith('image/');
       const isPdf = f.type === 'application/pdf';
-      const isText = f.name.endsWith('.txt') || f.name.endsWith('.md');
+      const isText = f.name.endsWith('.txt') || f.name.endsWith('.md') || f.name.endsWith('.json');
       
       let content = '';
       const reader = new FileReader();
@@ -260,7 +333,7 @@ const App: React.FC = () => {
                 </div>
                 <div>
                   <div className="text-4xl font-black mb-1">导入文档</div>
-                  <div className="text-sm font-bold opacity-70 italic">支持 PDF, 图片, TXT 自动分类预览</div>
+                  <div className="text-sm font-bold opacity-70 italic">支持 PDF, 图片, JSON, MD 预览</div>
                 </div>
               </div>
             </div>
@@ -365,7 +438,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* 视图 2: 客户智库 (逻辑保持不变) */}
+        {/* 视图 2: 客户智库 */}
         {activeView === 'customers' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-10">
@@ -452,7 +525,7 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* 视图 3: 智能分析 (保持不变) */}
+        {/* 视图 3: 智能分析 */}
         {activeView === 'analysis' && (
           <div className="animate-in fade-in slide-in-from-bottom-8 duration-700">
             {!analysisResult ? (
@@ -589,7 +662,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* 录入客户模态框 (保持不变) */}
+      {/* 录入客户模态框 */}
       {isAddingCustomer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-xl" onClick={() => setIsAddingCustomer(false)}></div>
@@ -701,11 +774,7 @@ const App: React.FC = () => {
                 </div>
               )}
               {previewFile.previewType === 'text' && (
-                <div className="bg-white p-12 rounded-[32px] shadow-sm border border-slate-100 max-w-4xl mx-auto">
-                  <div className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-slate-700 selection:bg-blue-100">
-                    {previewFile.content}
-                  </div>
-                </div>
+                <SmartTextPreview file={previewFile} />
               )}
               {previewFile.previewType === 'unsupported' && (
                 <div className="py-24 text-center max-w-lg mx-auto">
