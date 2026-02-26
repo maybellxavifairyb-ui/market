@@ -3,13 +3,15 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Plus, Search, Trash2, FileText, Image as ImageIcon, File, Download, 
   FileSearch, CheckSquare, Square, Loader2, X, FileWarning, PieChart, 
-  FileDown, FileSpreadsheet, Presentation, Key, Users, LayoutDashboard, 
+  FileDown, FileSpreadsheet, Presentation, Key, LayoutDashboard, 
   BarChart4, Save, Edit3, TrendingUp, AlertCircle, Activity, Target, 
   Zap, ChevronRight, Filter, Globe, Database, Eye, Clock, HardDrive,
   Braces, BookOpen
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { MarketFile, Customer, AnalysisResult, AppView } from './types';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
+import { MarketFile, AnalysisResult, AppView } from './types';
 import { geminiService } from './services/geminiService';
 
 // --- 工具函数：格式化文件大小 ---
@@ -92,29 +94,6 @@ const SmartTextPreview: React.FC<{ file: MarketFile }> = ({ file }) => {
   );
 };
 
-// --- 可视化组件：毛利分布图 ---
-const ProfitChart: React.FC<{ customers: Customer[] }> = ({ customers }) => {
-  const bins = [0, 5, 10, 15, 20, 25];
-  const data = bins.map(bin => customers.filter(c => c.grossMargin >= bin && c.grossMargin < bin + 5).length);
-  const max = Math.max(...data, 1);
-
-  return (
-    <div className="flex items-end gap-2 h-32 px-2">
-      {data.map((val, i) => (
-        <div key={i} className="flex-1 flex flex-col items-center gap-2 group">
-          <div 
-            className="w-full bg-blue-500/20 group-hover:bg-blue-500/40 transition-all rounded-t-lg relative"
-            style={{ height: `${(val / max) * 100}%` }}
-          >
-            {val > 0 && <span className="absolute -top-6 left-1/2 -translate-x-1/2 text-[10px] font-bold text-blue-600">{val}</span>}
-          </div>
-          <span className="text-[10px] text-slate-400 font-medium">{bins[i]}%</span>
-        </div>
-      ))}
-    </div>
-  );
-};
-
 // --- 可视化组件：活跃度迷你线图 ---
 const Sparkline: React.FC = () => (
   <svg viewBox="0 0 100 30" className="w-24 h-8 stroke-blue-500 fill-none stroke-[2]">
@@ -125,31 +104,21 @@ const Sparkline: React.FC = () => (
 const App: React.FC = () => {
   const [activeView, setActiveView] = useState<AppView>('reports');
   const [files, setFiles] = useState<MarketFile[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
-  const [selectedCustomerIds, setSelectedCustomerIds] = useState<Set<string>>(new Set());
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [previewFile, setPreviewFile] = useState<MarketFile | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   
-  const [isAddingCustomer, setIsAddingCustomer] = useState(false);
-  const [newCust, setNewCust] = useState<Omit<Customer, 'id'>>({
-    name: '', equipment: '', capacity: '', rawMaterials: '', products: '', grossMargin: 0
-  });
-
   useEffect(() => {
     const savedFiles = localStorage.getItem('market_files_v3');
-    const savedCusts = localStorage.getItem('market_customers_v3');
     if (savedFiles) setFiles(JSON.parse(savedFiles).map((f: any) => ({ ...f, blobUrl: undefined })));
-    if (savedCusts) setCustomers(JSON.parse(savedCusts));
   }, []);
 
   useEffect(() => {
     localStorage.setItem('market_files_v3', JSON.stringify(files.map(({blobUrl, ...rest}) => rest)));
-    localStorage.setItem('market_customers_v3', JSON.stringify(customers));
-  }, [files, customers]);
+  }, [files]);
 
   useEffect(() => { setSearchQuery(''); }, [activeView]);
 
@@ -157,16 +126,6 @@ const App: React.FC = () => {
     const q = searchQuery.toLowerCase();
     return files.filter(f => f.name.toLowerCase().includes(q));
   }, [files, searchQuery]);
-
-  const filteredCustomers = useMemo(() => {
-    const q = searchQuery.toLowerCase();
-    return customers.filter(c => 
-      c.name.toLowerCase().includes(q) || 
-      c.equipment.toLowerCase().includes(q) || 
-      c.products.toLowerCase().includes(q) ||
-      c.rawMaterials.toLowerCase().includes(q)
-    );
-  }, [customers, searchQuery]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const uploaded = e.target.files;
@@ -199,11 +158,10 @@ const App: React.FC = () => {
 
   const runAnalysis = async () => {
     const selFiles = files.filter(f => selectedFileIds.has(f.id));
-    const selCusts = customers.filter(c => selectedCustomerIds.has(c.id));
     if (selFiles.length === 0) return alert('请至少选择一份周报进行分析');
     setIsAnalyzing(true);
     try {
-      const res = await geminiService.analyzeMarketReports(selFiles, selCusts);
+      const res = await geminiService.analyzeMarketReports(selFiles);
       setAnalysisResult(res);
       setActiveView('analysis');
       setTimeout(() => document.getElementById('res-top')?.scrollIntoView({ behavior: 'smooth' }), 100);
@@ -211,13 +169,35 @@ const App: React.FC = () => {
     finally { setIsAnalyzing(false); }
   };
 
-  const deleteCustomer = (id: string) => {
-    setCustomers(prev => prev.filter(c => c.id !== id));
-    setSelectedCustomerIds(prev => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
+  const downloadAnalysisReport = async (viewId: string) => {
+    if (!analysisResult) return;
+
+    const element = document.getElementById(viewId);
+    if (!element) return;
+
+    setIsAnalyzing(true); // Reuse loading state for export
+    try {
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#ffffff'
+      });
+      
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`${analysisResult.title}_${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (error) {
+      console.error('PDF 导出失败:', error);
+      alert('PDF 导出失败，请重试');
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   // 根据预览类型获取对应的图标
@@ -261,8 +241,8 @@ const App: React.FC = () => {
           <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-4 px-2">主菜单</div>
           {[
             { id: 'reports', label: '周报管理', icon: LayoutDashboard, desc: '文档存储与存档' },
-            { id: 'customers', label: '客户智库', icon: Users, desc: '客户画像与产能' },
-            { id: 'analysis', label: 'AI 分析终端', icon: Zap, desc: '深度协同洞察' }
+            { id: 'analysis', label: 'AI 分析终端', icon: Zap, desc: '能源市场深度解析' },
+            { id: 'geopolitics', label: '地缘政治分析', icon: Globe, desc: '关键事件与市场影响' }
           ].map((item) => (
             <button 
               key={item.id}
@@ -438,93 +418,6 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* 视图 2: 客户智库 */}
-        {activeView === 'customers' && (
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-10">
-              <div className="lg:col-span-3 bg-white p-8 rounded-[32px] border border-slate-200 shadow-sm">
-                <div className="flex justify-between items-start mb-10">
-                  <div>
-                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">客户信息矩阵</h2>
-                    <p className="text-slate-500 mt-1 font-medium">客户情报与生产基地概览</p>
-                  </div>
-                  <button 
-                    onClick={() => setIsAddingCustomer(true)}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-3 rounded-2xl flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all font-bold active:scale-95"
-                  >
-                    <Plus size={20} /> <span>录入客户</span>
-                  </button>
-                </div>
-                
-                <div className="relative mb-6">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                  <input 
-                    type="text" 
-                    placeholder="按名称、装置或产品全域搜索..." 
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="pl-12 pr-6 py-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none w-full text-sm font-medium transition-all"
-                  />
-                </div>
-              </div>
-
-              <div className="bg-white p-8 rounded-[32px] border border-slate-200 shadow-sm flex flex-col justify-between">
-                <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">毛利分布概览</div>
-                <ProfitChart customers={customers} />
-              </div>
-            </div>
-
-            <div className="bg-white rounded-[32px] border border-slate-200 shadow-sm overflow-hidden">
-              <table className="w-full text-left">
-                <thead className="bg-slate-50/50 text-slate-400 uppercase text-[10px] font-black tracking-widest border-b border-slate-100">
-                  <tr>
-                    <th className="p-6 w-12 text-center">选</th>
-                    <th className="p-6">企业名称</th>
-                    <th className="p-6">装置 / 产能</th>
-                    <th className="p-6">原料链</th>
-                    <th className="p-6 text-center">毛利率</th>
-                    <th className="p-6 text-right">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {filteredCustomers.map(c => (
-                    <tr key={c.id} className="group hover:bg-slate-50/80 transition-all">
-                      <td className="p-6 text-center">
-                        <button onClick={() => {
-                          const next = new Set(selectedCustomerIds);
-                          next.has(c.id) ? next.delete(c.id) : next.add(c.id);
-                          setSelectedCustomerIds(next);
-                        }}>
-                          {selectedCustomerIds.has(c.id) ? <CheckSquare className="text-emerald-600 mx-auto" /> : <Square className="text-slate-200 group-hover:text-slate-400 mx-auto transition-colors" />}
-                        </button>
-                      </td>
-                      <td className="p-6"><span className="font-black text-slate-700 leading-tight">{c.name}</span></td>
-                      <td className="p-6">
-                        <div className="text-xs font-bold text-slate-700">{c.equipment}</div>
-                        <div className="text-[10px] text-slate-400 font-bold mt-0.5">产能: {c.capacity}</div>
-                      </td>
-                      <td className="p-6">
-                        <div className="flex flex-col gap-1">
-                          <span className="inline-flex items-center px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[9px] font-black rounded uppercase w-fit">入: {c.rawMaterials}</span>
-                          <span className="inline-flex items-center px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[9px] font-black rounded uppercase w-fit">出: {c.products}</span>
-                        </div>
-                      </td>
-                      <td className="p-6 text-center">
-                        <div className={`text-sm font-black ${c.grossMargin > 15 ? 'text-emerald-500' : 'text-amber-500'}`}>
-                          {c.grossMargin}%
-                        </div>
-                      </td>
-                      <td className="p-6 text-right opacity-0 group-hover:opacity-100 transition-all">
-                        <button onClick={() => deleteCustomer(c.id)} className="p-3 bg-white hover:bg-red-50 text-red-600 rounded-xl shadow-sm border border-slate-100"><Trash2 size={18}/></button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
         {/* 视图 3: 智能分析 */}
         {activeView === 'analysis' && (
           <div className="animate-in fade-in slide-in-from-bottom-8 duration-700">
@@ -538,9 +431,9 @@ const App: React.FC = () => {
                 </div>
                 
                 <div className="space-y-4">
-                  <h2 className="text-5xl font-black text-slate-900 tracking-tighter">AI 协同深度洞察终端</h2>
+                  <h2 className="text-5xl font-black text-slate-900 tracking-tighter">能源市场 AI 分析终端</h2>
                   <p className="text-slate-500 text-xl font-medium max-w-2xl mx-auto">
-                    自动交叉比对 <span className="text-blue-600 font-black">{selectedFileIds.size}</span> 份报告与 <span className="text-emerald-500 font-black">{selectedCustomerIds.size}</span> 家客户数据。
+                    利用 Gemini 3.1 Pro 深度解析 <span className="text-blue-600 font-black">{selectedFileIds.size}</span> 份能源报告。
                   </p>
                 </div>
 
@@ -556,12 +449,12 @@ const App: React.FC = () => {
                   >
                     {isAnalyzing && <Loader2 className="animate-spin" size={28} />}
                     {!isAnalyzing && <Target size={28} className="group-hover:rotate-45 transition-transform" />}
-                    <span>{isAnalyzing ? '正在重构市场逻辑...' : '启动深度协同分析'}</span>
+                    <span>{isAnalyzing ? '正在解析能源逻辑...' : '启动深度市场分析'}</span>
                   </button>
                   
                   {selectedFileIds.size === 0 && (
                     <div className="flex items-center gap-2 text-amber-600 bg-amber-50 px-4 py-2 rounded-full text-xs font-bold border border-amber-100">
-                      <AlertCircle size={14} /> 需要至少选择一份周报作为分析底稿
+                      <AlertCircle size={14} /> 需要至少选择一份报告作为分析底稿
                     </div>
                   )}
                 </div>
@@ -573,19 +466,19 @@ const App: React.FC = () => {
                     onClick={() => setAnalysisResult(null)} 
                     className="flex items-center gap-2 text-slate-400 hover:text-slate-900 font-black text-xs uppercase tracking-widest transition-all"
                   >
-                    <ChevronRight size={18} className="rotate-180" /> 重新设定参数
+                    <ChevronRight size={18} className="rotate-180" /> 重新选择报告
                   </button>
                   <div className="bg-blue-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-tighter shadow-lg shadow-blue-500/30">
-                    智能置信度: 98.4%
+                    Gemini 3.1 Pro 强力驱动
                   </div>
                 </div>
 
-                <div className="bg-white rounded-[48px] border border-slate-200 shadow-2xl overflow-hidden">
+                <div id="full-report-content" className="bg-white rounded-[48px] border border-slate-200 shadow-2xl overflow-hidden">
                   <div className="bg-slate-950 p-16 text-white relative overflow-hidden">
                     <div className="absolute top-0 right-0 w-96 h-96 bg-blue-600/10 blur-[120px] -mr-48 -mt-48"></div>
                     <div className="relative z-10">
                       <div className="flex items-center gap-3 text-blue-500 font-black text-[10px] uppercase tracking-[0.4em] mb-4">
-                        <Activity size={14}/> 综合市场情报分析
+                        <Activity size={14}/> 能源市场深度解析报告
                       </div>
                       <h1 className="text-6xl font-black mb-6 tracking-tight leading-none max-w-4xl">{analysisResult.title}</h1>
                       <div className="h-1 w-24 bg-blue-600 mb-8 rounded-full"></div>
@@ -593,65 +486,150 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-16 grid grid-cols-1 lg:grid-cols-3 gap-12">
-                    <div className="lg:col-span-2 space-y-12">
+                  <div className="p-16 space-y-16">
+                    {/* 地缘政治深度分析 */}
+                    {analysisResult.geopoliticalAnalysis && analysisResult.geopoliticalAnalysis.length > 0 && (
                       <section>
                         <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
-                          <TrendingUp className="text-blue-500" size={18}/> 核心宏观洞察
-                        </h4>
-                        <div className="grid gap-4">
-                          {analysisResult.keyInsights.map((i, idx) => (
-                            <div key={idx} className="bg-slate-50 p-6 rounded-3xl border border-slate-100 flex items-start gap-5 group hover:border-blue-200 transition-all">
-                              <span className="bg-white w-10 h-10 rounded-2xl flex items-center justify-center text-blue-600 font-black shadow-sm group-hover:bg-blue-600 group-hover:text-white transition-all">{idx+1}</span>
-                              <p className="flex-1 text-slate-700 font-bold leading-relaxed">{i}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-
-                      <section>
-                        <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
-                          <AlertCircle className="text-emerald-500" size={18}/> 盈利优化与战略建议
-                        </h4>
-                        <div className="grid gap-4">
-                          {analysisResult.recommendations.map((r, idx) => (
-                            <div key={idx} className="bg-emerald-50/30 p-6 rounded-3xl border border-emerald-100 flex items-start gap-4">
-                              <div className="mt-1 bg-emerald-500 rounded-full p-1"><X size={12} className="text-white rotate-45"/></div>
-                              <p className="text-emerald-900 font-bold">{r}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    </div>
-
-                    <div className="space-y-12">
-                      <section>
-                        <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
-                          <Users className="text-blue-500" size={18}/> 客户针对性画像策略
+                          <Globe className="text-blue-500" size={18}/> 地缘政治深度分析
                         </h4>
                         <div className="space-y-4">
-                          {analysisResult.customerStrategies?.map((s, idx) => (
-                            <div key={idx} className="bg-white border border-slate-100 p-8 rounded-[32px] shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
-                              <div className="flex justify-between items-start mb-6">
-                                <h5 className="text-xl font-black text-slate-900">{s.name}</h5>
-                                <div className="p-2 bg-blue-50 text-blue-600 rounded-xl"><Target size={16}/></div>
-                              </div>
-                              <div className="space-y-4">
-                                <div className="p-4 bg-slate-50 rounded-2xl">
-                                  <div className="text-[10px] font-black text-slate-400 uppercase mb-2">执行路线图</div>
-                                  <div className="text-sm font-bold text-slate-700">{s.strategy}</div>
+                          {analysisResult.geopoliticalAnalysis.map((item, idx) => (
+                            <div key={idx} className="bg-slate-50 p-8 rounded-[32px] border border-slate-100 flex flex-col md:flex-row gap-6 items-start">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-3 mb-2">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest ${
+                                    item.severity === 'high' ? 'bg-rose-100 text-rose-600' :
+                                    item.severity === 'medium' ? 'bg-amber-100 text-amber-600' :
+                                    'bg-blue-100 text-blue-600'
+                                  }`}>
+                                    {item.severity === 'high' ? '高风险' : item.severity === 'medium' ? '中等风险' : '低风险'}
+                                  </span>
+                                  <h5 className="text-xl font-black text-slate-900">{item.event}</h5>
                                 </div>
-                                <div className="p-4 bg-blue-50/50 rounded-2xl">
-                                  <div className="text-[10px] font-black text-blue-400 uppercase mb-2">核心增长点</div>
-                                  <div className="text-sm font-bold text-blue-800">{s.opportunity}</div>
+                                <p className="text-slate-600 font-medium leading-relaxed">{item.impact}</p>
+                              </div>
+                              <div className="md:w-48 shrink-0">
+                                <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">风险评估</div>
+                                <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                                  <div className={`h-full rounded-full ${
+                                    item.severity === 'high' ? 'bg-rose-500 w-full' :
+                                    item.severity === 'medium' ? 'bg-amber-500 w-2/3' :
+                                    'bg-blue-500 w-1/3'
+                                  }`}></div>
                                 </div>
                               </div>
                             </div>
                           ))}
                         </div>
                       </section>
-                      <button className="w-full py-5 bg-slate-900 text-white rounded-[32px] font-black text-lg flex items-center justify-center gap-3 shadow-xl hover:bg-blue-600 transition-all">
-                        <FileDown size={24}/> 导出报告 (PDF/MD)
+                    )}
+
+                    {/* 核心影响因素 */}
+                    <section>
+                      <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
+                        <Globe className="text-blue-500" size={18}/> 核心影响因素
+                      </h4>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div className="bg-slate-50 p-8 rounded-[32px] border border-slate-100">
+                          <div className="text-[10px] font-black text-blue-500 uppercase mb-4 tracking-widest">地缘政治动态</div>
+                          <p className="text-slate-700 font-bold leading-relaxed">{analysisResult.influencingFactors.geopolitics}</p>
+                        </div>
+                        <div className="bg-slate-50 p-8 rounded-[32px] border border-slate-100">
+                          <div className="text-[10px] font-black text-emerald-500 uppercase mb-4 tracking-widest">炼厂供应情况</div>
+                          <p className="text-slate-700 font-bold leading-relaxed">{analysisResult.influencingFactors.refinerySupply}</p>
+                        </div>
+                        <div className="bg-slate-50 p-8 rounded-[32px] border border-slate-100">
+                          <div className="text-[10px] font-black text-amber-500 uppercase mb-4 tracking-widest">库存水平</div>
+                          <p className="text-slate-700 font-bold leading-relaxed">{analysisResult.influencingFactors.inventoryLevels}</p>
+                        </div>
+                      </div>
+                    </section>
+
+                    {/* 趋势预测 */}
+                    <section>
+                      <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
+                        <TrendingUp className="text-blue-500" size={18}/> 重点产品趋势预测
+                      </h4>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-sm hover:shadow-md transition-all">
+                          <div className="flex justify-between items-center mb-6">
+                            <h5 className="text-xl font-black text-slate-900">石脑油</h5>
+                            <div className="p-2 bg-blue-50 text-blue-600 rounded-xl"><Zap size={16}/></div>
+                          </div>
+                          <p className="text-slate-600 font-medium leading-relaxed">{analysisResult.trendPredictions.naphtha}</p>
+                        </div>
+                        <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-sm hover:shadow-md transition-all">
+                          <div className="flex justify-between items-center mb-6">
+                            <h5 className="text-xl font-black text-slate-900">柴油</h5>
+                            <div className="p-2 bg-rose-50 text-rose-600 rounded-xl"><Zap size={16}/></div>
+                          </div>
+                          <p className="text-slate-600 font-medium leading-relaxed">{analysisResult.trendPredictions.diesel}</p>
+                        </div>
+                        <div className="bg-white p-8 rounded-[32px] border border-slate-100 shadow-sm hover:shadow-md transition-all">
+                          <div className="flex justify-between items-center mb-6">
+                            <h5 className="text-xl font-black text-slate-900">蜡油/气油</h5>
+                            <div className="p-2 bg-amber-50 text-amber-600 rounded-xl"><Zap size={16}/></div>
+                          </div>
+                          <p className="text-slate-600 font-medium leading-relaxed">{analysisResult.trendPredictions.gasOil}</p>
+                        </div>
+                      </div>
+                    </section>
+
+                    {/* 价格对比表 */}
+                    <section>
+                      <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
+                        <FileSpreadsheet className="text-blue-500" size={18}/> 产品价格对比表
+                      </h4>
+                      <div className="bg-white rounded-[32px] border border-slate-200 overflow-hidden shadow-sm">
+                        <table className="w-full text-left">
+                          <thead className="bg-slate-50 text-slate-400 uppercase text-[10px] font-black tracking-widest">
+                            <tr>
+                              <th className="p-6">产品名称</th>
+                              <th className="p-6">当前价格</th>
+                              <th className="p-6">上期价格</th>
+                              <th className="p-6">涨跌幅</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {analysisResult.priceComparisonTable.map((row, idx) => (
+                              <tr key={idx} className="hover:bg-slate-50 transition-all">
+                                <td className="p-6 font-black text-slate-700">{row.product}</td>
+                                <td className="p-6 font-mono text-sm font-bold text-slate-600">{row.currentPrice}</td>
+                                <td className="p-6 font-mono text-sm text-slate-400">{row.previousPrice}</td>
+                                <td className={`p-6 font-bold ${row.change.includes('+') || row.change.includes('涨') ? 'text-rose-500' : row.change.includes('-') || row.change.includes('跌') ? 'text-emerald-500' : 'text-slate-400'}`}>
+                                  {row.change}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
+
+                    {/* 销售建议 */}
+                    <section>
+                      <h4 className="text-xs font-black mb-8 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
+                        <Target className="text-emerald-500" size={18}/> 专业销售操作建议
+                      </h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {analysisResult.salesRecommendations.map((rec, idx) => (
+                          <div key={idx} className="bg-emerald-50/50 p-6 rounded-3xl border border-emerald-100 flex items-start gap-4">
+                            <div className="mt-1 bg-emerald-500 rounded-full p-1"><CheckSquare size={12} className="text-white"/></div>
+                            <p className="text-emerald-900 font-bold leading-relaxed">{rec}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+
+                    <div className="flex justify-center pt-8">
+                      <button 
+                        onClick={() => downloadAnalysisReport('full-report-content')}
+                        disabled={isAnalyzing}
+                        className="px-12 py-5 bg-slate-900 text-white rounded-[32px] font-black text-lg flex items-center justify-center gap-3 shadow-xl hover:bg-blue-600 transition-all active:scale-95 disabled:opacity-50"
+                      >
+                        {isAnalyzing ? <Loader2 className="animate-spin" size={24} /> : <FileDown size={24}/>}
+                        导出分析报告 (PDF)
                       </button>
                     </div>
                   </div>
@@ -660,65 +638,127 @@ const App: React.FC = () => {
             )}
           </div>
         )}
-      </main>
-
-      {/* 录入客户模态框 */}
-      {isAddingCustomer && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-xl" onClick={() => setIsAddingCustomer(false)}></div>
-          <div className="relative bg-white w-full max-w-xl rounded-[48px] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
-            <div className="p-10 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <div>
-                <h3 className="text-3xl font-black text-slate-900">录入新客户数据</h3>
-                <p className="text-slate-400 text-xs font-bold uppercase mt-1">企业信息采集</p>
-              </div>
-              <button onClick={() => setIsAddingCustomer(false)} className="p-3 hover:bg-white rounded-2xl shadow-sm transition-all"><X/></button>
-            </div>
-            <div className="p-10 space-y-6">
-              <div className="grid grid-cols-2 gap-6">
-                <div className="col-span-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2 px-1">企业名称</label>
-                  <input value={newCust.name} onChange={e=>setNewCust({...newCust, name: e.target.value})} className="w-full p-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none font-bold" placeholder="例如: 某某实业控股"/>
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2 px-1">装置类型</label>
-                  <input value={newCust.equipment} onChange={e=>setNewCust({...newCust, equipment: e.target.value})} className="w-full p-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none font-bold" placeholder="例如: 裂解装置"/>
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2 px-1">年产能 (万吨/年)</label>
-                  <input value={newCust.capacity} onChange={e=>setNewCust({...newCust, capacity: e.target.value})} className="w-full p-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none font-bold" placeholder="例如: 50.0"/>
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2 px-1">所需原料</label>
-                  <input value={newCust.rawMaterials} onChange={e=>setNewCust({...newCust, rawMaterials: e.target.value})} className="w-full p-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none font-bold" placeholder="石脑油/乙烷"/>
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2 px-1">关键产出</label>
-                  <input value={newCust.products} onChange={e=>setNewCust({...newCust, products: e.target.value})} className="w-full p-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none font-bold" placeholder="聚合级丙烯"/>
-                </div>
-                <div className="col-span-2">
-                  <div className="flex justify-between mb-2 px-1">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">预测毛利率 (%)</label>
-                    <span className="text-xs font-black text-blue-600">{newCust.grossMargin}%</span>
+        {/* 视图 4: 地缘政治分析专用模块 */}
+        {activeView === 'geopolitics' && (
+          <div className="animate-in fade-in slide-in-from-bottom-8 duration-700">
+            <div className="max-w-6xl mx-auto space-y-10">
+              <div className="bg-white p-12 rounded-[48px] border border-slate-200 shadow-sm relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 blur-[80px] -mr-32 -mt-32"></div>
+                <div className="relative z-10">
+                  <div className="flex items-center gap-3 text-blue-600 font-black text-[10px] uppercase tracking-[0.4em] mb-4">
+                    <Globe size={16}/> Geopolitical Intelligence
                   </div>
-                  <input 
-                    type="range" min="0" max="50" step="1"
-                    value={newCust.grossMargin} 
-                    onChange={e=>setNewCust({...newCust, grossMargin: Number(e.target.value)})} 
-                    className="w-full h-2 bg-slate-100 rounded-full appearance-none cursor-pointer accent-blue-600"
-                  />
+                  <h2 className="text-5xl font-black text-slate-900 tracking-tighter mb-6">地缘政治动态分析模块</h2>
+                  <p className="text-slate-500 text-xl font-medium max-w-2xl">
+                    专门提取全球范围内的关键政治事件，深度解析其对原油供应、炼厂运行及能源价格链条的连锁反应。
+                  </p>
                 </div>
               </div>
-              <button onClick={() => {
-                if (!newCust.name) return;
-                setCustomers(prev => [...prev, { ...newCust, id: Math.random().toString(36).substr(2, 9) }]);
-                setNewCust({ name: '', equipment: '', capacity: '', rawMaterials: '', products: '', grossMargin: 0 });
-                setIsAddingCustomer(false);
-              }} className="w-full py-5 bg-slate-900 hover:bg-blue-600 text-white rounded-3xl font-black text-lg shadow-xl transition-all mt-4">确认录入</button>
+
+              {analysisResult?.geopoliticalAnalysis ? (
+                <div className="space-y-8">
+                  <div className="flex justify-between items-center px-4">
+                    <h3 className="text-2xl font-black text-slate-900">最新提取的事件 ({analysisResult.geopoliticalAnalysis.length})</h3>
+                    <div className="flex gap-3">
+                      <button 
+                        onClick={() => downloadAnalysisReport('geopolitics-report-content')}
+                        disabled={isAnalyzing}
+                        className="flex items-center gap-2 bg-white border border-slate-200 text-slate-900 px-6 py-3 rounded-2xl font-bold hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50"
+                      >
+                        {isAnalyzing ? <Loader2 className="animate-spin" size={18} /> : <FileDown size={18} />}
+                        导出报告 (PDF)
+                      </button>
+                      <button 
+                        onClick={runAnalysis}
+                        disabled={isAnalyzing || selectedFileIds.size === 0}
+                        className="flex items-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold hover:bg-blue-600 transition-all disabled:opacity-50"
+                      >
+                        {isAnalyzing ? <Loader2 className="animate-spin" size={18} /> : <Zap size={18} />}
+                        重新分析
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div id="geopolitics-report-content" className="grid grid-cols-1 gap-6">
+                    {analysisResult.geopoliticalAnalysis.map((item, idx) => (
+                      <div key={idx} className="bg-white p-10 rounded-[40px] border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-500 group">
+                        <div className="flex flex-col md:flex-row gap-8">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-4 mb-6">
+                              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${
+                                item.severity === 'high' ? 'bg-rose-100 text-rose-600' :
+                                item.severity === 'medium' ? 'bg-amber-100 text-amber-600' :
+                                'bg-blue-100 text-blue-600'
+                              }`}>
+                                <AlertCircle size={24} />
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-3">
+                                  <h4 className="text-2xl font-black text-slate-900">{item.event}</h4>
+                                  <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${
+                                    item.severity === 'high' ? 'bg-rose-600 text-white' :
+                                    item.severity === 'medium' ? 'bg-amber-500 text-white' :
+                                    'bg-blue-500 text-white'
+                                  }`}>
+                                    {item.severity === 'high' ? '高风险' : item.severity === 'medium' ? '中等风险' : '低风险'}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">事件性质: 地缘政治冲突 / 政策变动</div>
+                              </div>
+                            </div>
+                            <div className="bg-slate-50 p-8 rounded-[32px] border border-slate-100">
+                              <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">市场影响深度解析</div>
+                              <p className="text-slate-700 text-lg font-bold leading-relaxed">{item.impact}</p>
+                            </div>
+                          </div>
+                          <div className="md:w-64 space-y-6">
+                            <div className="bg-slate-50 p-6 rounded-[32px] border border-slate-100">
+                              <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">风险指数</div>
+                              <div className="flex items-end gap-1 mb-2">
+                                <span className="text-4xl font-black text-slate-900">
+                                  {item.severity === 'high' ? '9.2' : item.severity === 'medium' ? '6.5' : '3.8'}
+                                </span>
+                                <span className="text-slate-400 font-bold mb-1">/ 10</span>
+                              </div>
+                              <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                                <div className={`h-full rounded-full transition-all duration-1000 ${
+                                  item.severity === 'high' ? 'bg-rose-500 w-[92%]' :
+                                  item.severity === 'medium' ? 'bg-amber-500 w-[65%]' :
+                                  'bg-blue-500 w-[38%]'
+                                }`}></div>
+                              </div>
+                            </div>
+                            <button className="w-full py-4 bg-white border border-slate-200 rounded-2xl text-slate-600 font-bold hover:bg-slate-50 transition-all flex items-center justify-center gap-2">
+                              <Edit3 size={16}/> 添加备注
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-white p-20 rounded-[48px] border border-slate-200 text-center space-y-8">
+                  <div className="w-24 h-24 bg-slate-50 rounded-[32px] flex items-center justify-center mx-auto text-slate-300">
+                    <Globe size={48}/>
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="text-3xl font-black text-slate-900">尚未生成地缘政治报告</h3>
+                    <p className="text-slate-500 font-medium max-w-md mx-auto">请先在“周报管理”中选择报告，然后点击下方按钮启动地缘政治专项分析。</p>
+                  </div>
+                  <button 
+                    onClick={runAnalysis}
+                    disabled={isAnalyzing || selectedFileIds.size === 0}
+                    className="bg-slate-900 text-white px-10 py-5 rounded-[32px] font-black text-xl hover:bg-blue-600 transition-all shadow-xl disabled:opacity-50"
+                  >
+                    {isAnalyzing ? '正在深度扫描全球动态...' : '启动地缘政治专项分析'}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </main>
 
       {/* 文件预览模态框 */}
       {previewFile && (
